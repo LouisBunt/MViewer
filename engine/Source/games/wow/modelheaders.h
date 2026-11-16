@@ -130,6 +130,12 @@ struct ModelHeader {
 #define  ANIMATION_HANDSCLOSED  15
 #define  ANIMATION_MOUNT      91
 #define  ANIMATION_LOOPED    0x20 // flags
+// The same bit, by what the game reads it for: the sequence's keys are in the model (or its
+// skeleton). Without it they are in the sequence's .anim file and nowhere else.
+#define  ANIMATION_KEYS_IN_MODEL 0x20
+// The sequence has no keys of its own: they are in the sequence its Index (alias) names,
+// followed until one without this flag.
+#define  ANIMATION_ALIAS     0x40
 // block B - animations, size 68 bytes, WotLK 64 bytes
 struct ModelAnimation {
   int16 animID; // AnimationDataDB.ID
@@ -175,11 +181,18 @@ struct AnimationBlockHeader
 };
 
 #define  MODELBONE_BILLBOARD  8
+// Cylindrical billboards: the bone turns about one of its own axes only, as far toward the
+// camera as that axis allows -- a beam about its length, a flame about its height.
+#define  MODELBONE_BILLBOARD_LOCK_X  0x10
+#define  MODELBONE_BILLBOARD_LOCK_Y  0x20
+#define  MODELBONE_BILLBOARD_LOCK_Z  0x40
+#define  MODELBONE_BILLBOARD_ANY  (MODELBONE_BILLBOARD | MODELBONE_BILLBOARD_LOCK_X | \
+                                   MODELBONE_BILLBOARD_LOCK_Y | MODELBONE_BILLBOARD_LOCK_Z)
 #define  MODELBONE_TRANSFORM  512
 // block E - bones
 struct ModelBoneDef {
   int32 keyboneid; // Back-reference to the key bone lookup table. -1 if this is no key bone.
-  int32 flags; // Only known flags: 8 - billboarded and 512 - transformed
+  int32 flags; // 8 - billboarded, 0x10/0x20/0x40 - cylindrical billboards, 512 - transformed
   int16 parent; // parent bone index
   int16 geoid; // A geoset for this bone.
   int32 unknown; // new int added to the bone definitions.  Added in WoW 2.0

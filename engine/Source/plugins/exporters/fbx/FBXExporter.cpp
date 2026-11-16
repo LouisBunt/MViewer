@@ -764,19 +764,20 @@ static bool extractScrollTrack(const TextureAnim & ta, ssize_t modelAnim, FBXScr
   const Animated<glm::vec3> & tr = ta.trans;
   ssize_t anim;
   int periodMs = 0;
-  if (tr.seq >= 0 && tr.seq < (ssize_t)tr.globals.size())
+  if (tr.seq >= 0)
   {
-    if (tr.globals[tr.seq] == 0) return false; // zero-length global sequence never plays
+    // A zero-length global sequence (or a bad index) holds its first key: nothing scrolls.
+    if (tr.seq >= (ssize_t)tr.globals.size() || tr.globals[tr.seq] == 0) return false;
     anim = 0;                                   // global-sequence tracks read animation slot 0
     periodMs = (int)tr.globals[tr.seq];
   }
   else
   {
     anim = modelAnim;
-    if (anim < 0 || anim >= MAX_ANIMATED || tr.times[anim].empty()) return false;
+    if (anim < 0 || anim >= (ssize_t)tr.times.size() || tr.times[anim].empty()) return false;
     periodMs = (int)tr.times[anim].back();
   }
-  if (anim < 0 || anim >= MAX_ANIMATED || tr.data[anim].empty()) return false;
+  if (anim < 0 || anim >= (ssize_t)tr.data.size() || tr.data[anim].empty()) return false;
 
   out.keys.clear();
   for (size_t k = 0; k < tr.data[anim].size(); k++)

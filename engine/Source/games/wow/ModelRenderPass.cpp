@@ -352,18 +352,18 @@ namespace
 {
   // Peak value an AnimatedShort track reaches over its animation cycle: the maximum of its
   // keyframes, exact for NONE/LINEAR interpolation (the only types opacity tracks use). Mirrors
-  // getValue()'s sequence routing -- a global-sequence track reads track 0 (and a zero-length
-  // global sequence never plays, yielding the 0 default), a plain track reads the requested
+  // getValue()'s sequence routing -- a global-sequence track reads track 0, and a zero-length
+  // global sequence (or a bad index) holds its first key; a plain track reads the requested
   // animation. Used by init(forExport = true); see the header.
   float trackPeakValue(const AnimatedShort & track, ssize_t anim)
   {
-    if (track.seq >= 0 && track.seq < (ssize_t)track.globals.size())
+    if (track.seq >= 0)
     {
-      if (!track.globals[track.seq])
-        return 0.0f;
+      if (track.seq >= (ssize_t)track.globals.size() || !track.globals[track.seq])
+        return (track.data.empty() || track.data[0].empty()) ? 0.0f : track.data[0][0];
       anim = 0;
     }
-    if (anim < 0 || anim >= MAX_ANIMATED || track.data[anim].empty())
+    if (anim < 0 || anim >= (ssize_t)track.data.size() || track.data[anim].empty())
       return 0.0f;
     float peak = track.data[anim][0];
     for (const float v : track.data[anim])
@@ -413,7 +413,7 @@ bool ModelRenderPass::init(bool forExport)
         const bool glob = (op.seq >= 0 && op.seq < (ssize_t)op.globals.size());
         const size_t a = (op.seq > -1) ? 0 : (size_t)model->anim;
         QString keys;
-        if (a < MAX_ANIMATED)
+        if (a < op.data.size())
           for (size_t k = 0; k < op.data[a].size() && k < 32; k++)
             keys += QString(" %1:%2").arg(k < op.times[a].size() ? (qulonglong)op.times[a][k] : 0)
                                      .arg(op.data[a][k]);
@@ -453,7 +453,7 @@ bool ModelRenderPass::init(bool forExport)
       const AnimatedShort & tr = model->transparency[opacity].trans;
       const bool glob = (tr.seq >= 0 && tr.seq < (ssize_t)tr.globals.size());
       QString keys;
-      for (size_t k = 0; k < tr.data[0].size() && k < 32; k++)
+      for (size_t k = 0; !tr.data.empty() && k < tr.data[0].size() && k < 32; k++)
         keys += QString(" %1:%2").arg(k < tr.times[0].size() ? (qulonglong)tr.times[0][k] : 0)
                                  .arg(tr.data[0][k]);
       LOG_INFO << "[matdump-opacity] geoIndex" << geoIndex << "opacityIdx" << (int)opacity
