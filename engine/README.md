@@ -68,6 +68,18 @@ And with the move into this repository:
 | `plugins/importers/armory` | the "no proxy" message names the setting the application reads, not the wx program's dialog |
 | `blender_addon` | shown as "MViewer FBX"; the module, its operators and the handshake folder keep their names, so an installed copy updates in place |
 
+Since then, the animation. Each of these took a real model apart or held it still; the cases are
+checked by `tests/animtest` without game data:
+
+| Where | Change |
+|---|---|
+| `WoWModel::readAnimsFromFile`, `modelAnimData`, `Animated::init` | a sequence's keys are read from that sequence's own `.anim` file. The files were keyed by animation id, so every variation of an animation but the last (Stand 0, Stand 1, ...) and every sequence stored in the model read another sequence's file, and the bones flew apart: 78 of the 416 sequences of the human male. A sequence whose `.anim` file is missing has no keys instead of reading the model at the file's offsets, a track on a global sequence never reads an `.anim` file, and the limit of 500 sequences is gone |
+| `animated.h`: `animtrack::findSegment`, `animtrack::trackTime` | the keyframe search holds the end keys instead of extrapolating -- before the first key, `time - t1` underflowed into a ratio near 1.8e19 -- and two keys on one time no longer divide by zero. A global sequence of length 0 holds its first key instead of a zero value, which collapsed a scaled bone onto its pivot. Array counts are clamped to the file |
+| `WoWModel::dataSequence`, `animate`, `calcBones` | an alias sequence (flag 0x40) plays the sequence it stands for instead of the bind pose |
+| `Bone::calcMatrix`, `Bone::billboardMatrix` | billboards face the camera. The spherical kind had been ported with its matrix transposed and for a Y-up space, so it tipped over and flattened into a line seen from the side; the cylindrical kinds (0x10, 0x20, 0x40) are new. The bone's rotation reaches normals, light directions and particle emission again: `mrot` was built from an identity, so every emitter sprayed straight up |
+| `WoWModel::isAnimated` | a model whose only moving parts are cylindrical billboards counts as animated |
+| `ModelRenderPass`, `FBXExporter` | read the tracks' new storage (one array per declared sequence instead of 500) |
+
 ## Building
 
 On its own, before the application, which links its import libraries:

@@ -1,7 +1,10 @@
 #ifndef ANIMATED_H
 #define ANIMATED_H
 
+#include <algorithm>
+#include <cstring>
 #include <map>
+#include <ostream>
 #include <utility>
 #include <vector>
 
@@ -23,12 +26,24 @@
 #    define _ANIMATED_API_
 #endif
 
+// Where the keyframes of each animation sequence live. A track's per-sequence array headers
+// are always in the file that defines the track -- the M2's MD21 chunk, or a skeleton's SKB1 --
+// and point at their keys: in that same file, or, for a sequence stored outside the model, in
+// that sequence's .anim file.
 class modelAnimData
 {
 public:
-  std::map<uint, int16> animIndexToAnimId;
-  std::map<int16, std::pair<GameFile *, GameFile *> > animfiles;
-  std::vector<uint32> globalSequences;  
+  // Keyed by SEQUENCE INDEX, which is what a track's per-sequence arrays are indexed by. It
+  // used to be keyed by animation id: every variation of an animation (Stand 0, Stand 1, ...)
+  // then read its keys from whichever variation's .anim file was registered last, and a
+  // sequence stored in the model read them from a sibling's .anim file. The offsets pointed
+  // into the wrong buffer either way, and the bones came out as garbage.
+  //
+  // A sequence whose keys are in the model has no entry. One whose keys are in an .anim file
+  // that could not be found has an entry of 0: it has no keys, and must not read the model
+  // with offsets meant for the file.
+  std::map<size_t, GameFile *> animfiles;
+  std::vector<uint32> globalSequences;
 };
 
 // interpolation functions
@@ -88,6 +103,81 @@ enum Interpolations {
   INTERPOLATION_BEZIER
 };
 
+// The time arithmetic of a track, apart from the class so the tests can reach it.
+namespace animtrack
+{
+// The clock a track runs on. A track bound to a global sequence runs on the model-wide clock,
+// wrapped to the sequence's length. A global sequence of length 0 holds its first key, as the
+// game does; so does an index past the end of the list. Everything else runs on the time
+// within the playing sequence.
+//
+// A length of 0 used to return a default-constructed value instead of the first key: a zero
+// vector -- which for a SCALE track collapses every vertex of the bone onto its pivot -- and an
+// index past the end fell through to the per-sequence arrays, which a global track does not
+// have, with the same result.
+inline size_t trackTime(ssize_t seq, const std::vector<uint32> & globals, size_t sequenceTime,
+                        size_t globalClock)
+{
+  if (seq < 0)
+    return sequenceTime;
+  const uint32 length = (seq < (ssize_t)globals.size()) ? globals[seq] : 0;
+  return length ? globalClock % length : 0;
+}
+
+// The keyframe segment `time` falls in: its first key, and how far into it (0..1). Before the
+// first key and from the last one on, the end key holds.
+//
+// The search used to start every lookup at segment 0 and keep it when nothing matched, so a
+// time before the first key -- or exactly on the last one -- extrapolated the first segment by
+// an unbounded factor. Before the first key it was worse: time - t1 underflowed in size_t and
+// the ratio came out near 1.8e19, which flings a bone and everything skinned to it to
+// infinity. Two keys on the same time divided by zero.
+struct Segment
+{
+  size_t index;
+  float ratio;
+};
+
+inline Segment findSegment(const std::vector<size_t> & times, size_t count, size_t time)
+{
+  if (count < 2 || time <= times[0])
+    return { 0, 0.0f };
+  if (time >= times[count - 1])
+    return { count - 1, 0.0f };
+
+  size_t i = size_t(std::upper_bound(times.begin(), times.begin() + count, time) - times.begin());
+  i = (i == 0) ? 0 : i - 1;
+  if (i > count - 2)          // unsorted keys from a malformed file
+    i = count - 2;
+  const size_t t1 = times[i];
+  const size_t t2 = times[i + 1];
+  if (t2 <= t1 || time < t1)
+    return { i, 0.0f };
+  return { i, float(time - t1) / float(t2 - t1) };
+}
+
+// The sequence whose keys play when sequence `index` plays. An alias (ANIMATION_ALIAS) has no
+// keys of its own and stands for the sequence its Index names, which may be an alias in turn.
+// Every other sequence -- and anything out of range -- is its own. The walk is bounded, so an
+// alias loop in a malformed file cannot hang the frame.
+//
+// Aliases used to be played as they were: every bone track of them is empty, so each bone
+// fell back to its rest pose -- or, for a scale track, to a zero vector that collapsed it.
+inline ssize_t dataSequence(const std::vector<ModelAnimation> & anims, ssize_t index)
+{
+  for (size_t hops = 0; hops < anims.size(); hops++)
+  {
+    if (index < 0 || index >= (ssize_t)anims.size() || !(anims[index].flags & ANIMATION_ALIAS))
+      return index;
+    const ssize_t next = anims[index].Index;
+    if (next < 0 || next >= (ssize_t)anims.size() || next == index)
+      return index;
+    index = next;
+  }
+  return index;
+}
+}
+
 template <class T>
 class Identity {
 public:
@@ -100,9 +190,9 @@ public:
 // In WoW 2.0+ Blizzard are now storing rotation data in 16bit values instead of 32bit.
 // I don't really understand why as its only a very minor saving in model sizes and adds extra overhead in
 // processing the models.  Need this structure to read the data into.
-struct PACK_QUATERNION {  
-  int16 x,y,z,w;  
-}; 
+struct PACK_QUATERNION {
+  int16 x,y,z,w;
+};
 
 class Quat16ToQuat32 {
 public:
@@ -110,7 +200,7 @@ public:
   {
     return glm::fquat(
       float(t.w < 0 ? t.w + 32768 : t.w - 32767) / 32767.0f,
-      float(t.x < 0? t.x + 32768 : t.x - 32767)/ 32767.0f, 
+      float(t.x < 0? t.x + 32768 : t.x - 32767)/ 32767.0f,
       float(t.y < 0? t.y + 32768 : t.y - 32767)/ 32767.0f,
       float(t.z < 0? t.z + 32768 : t.z - 32767)/ 32767.0f);
   }
@@ -136,278 +226,110 @@ public:
   (there might be a nicer way to do this? meh meh)
 */
 
-#define  MAX_ANIMATED  500
 template <class T, class D=T, class Conv=Identity<T> >
 class Animated {
 public:
 
-  ssize_t type, seq;
+  ssize_t type = INTERPOLATION_NONE, seq = -1;
   std::vector<uint32> globals;
-  std::vector<size_t> times[MAX_ANIMATED];
-  std::vector<T> data[MAX_ANIMATED];
+  // One array per animation sequence, indexed like the model's sequences -- or a single one
+  // for a track on a global sequence. Sized to what the track declares: they used to be fixed
+  // arrays of 500, which silently dropped every sequence past the 500th (modern characters
+  // have more) and cost 48 KB per track even when it held a single key.
+  std::vector<std::vector<size_t> > times;
+  std::vector<std::vector<T> > data;
   // for nonlinear interpolations:
-  std::vector<T> in[MAX_ANIMATED], out[MAX_ANIMATED];
-  size_t sizes; // for fix function
+  std::vector<std::vector<T> > in, out;
+  size_t sizes = 0; // for fix function
 
   bool uses(ssize_t anim) const
   {
     if (seq>-1)
       anim = 0;
-    // data[]/times[] are fixed-size arrays of MAX_ANIMATED; a model with more animation
-    // sequences than that (or a bogus index) must not run off the end.
-    if (anim < 0 || anim >= MAX_ANIMATED)
-      return false;
-    return ((data[anim].size()) > 0);
+    return anim >= 0 && anim < (ssize_t)data.size() && !data[anim].empty();
   }
 
-  T getValue(ssize_t anim, size_t time)
+  T getValue(ssize_t anim, size_t time) const
   {
-    // obtain a time value and a data range
-    if (seq >= 0 && seq < (int)globals.size()) {
-      // TODO
-      if (!globals[seq])
-        return T();
-      if (globals[seq]==0)
-        time = 0;
-      else
-        time = globalTime % globals[seq];
+    if (seq > -1)
+    {
+      time = animtrack::trackTime(seq, globals, time, globalTime);
       anim = 0;
     }
-    if (anim < 0 || anim >= MAX_ANIMATED)
+    if (anim < 0 || anim >= (ssize_t)data.size() || data[anim].empty())
       return T();
-    if (data[anim].size()>1 && times[anim].size()>1) {
-      size_t t1, t2;
-      size_t pos=0;
-      float r;
-      size_t max_time = times[anim][times[anim].size()-1];
-      //if (max_time > 0)
-      //  time %= max_time; // I think this might not be necessary?
-      if (time > max_time) {
-        pos=times[anim].size()-1;
-        r = 1.0f;
 
-        if (type == INTERPOLATION_NONE) 
-          return data[anim][pos];
-        else if (type == INTERPOLATION_LINEAR) 
-          return interpolate<T>(r,data[anim][pos],data[anim][pos]);
-        else if (type==INTERPOLATION_HERMITE){
-          // INTERPOLATION_HERMITE is only used in cameras afaik?
-          return interpolateHermite<T>(r,data[anim][pos],data[anim][pos],in[anim][pos],out[anim][pos]);
-        }
-        else if (type==INTERPOLATION_BEZIER){
-          //Is this used ingame or only by custom models?
-          return interpolateBezier<T>(r,data[anim][pos],data[anim][pos],in[anim][pos],out[anim][pos]);
-        }
-        else //this shouldn't appear!
-          return data[anim][pos];
-      } else {
-        for (size_t i=0; i<times[anim].size()-1; i++) {
-          if (time >= times[anim][i] && time < times[anim][i+1]) {
-            pos = i;
-            break;
-          }
-        }
-        t1 = times[anim][pos];
-        t2 = times[anim][pos+1];
-        r = (time-t1)/(float)(t2-t1);
+    const std::vector<T> & keys = data[anim];
+    const size_t count = std::min(keys.size(), times[anim].size());
+    if (count < 2)
+      return keys[0];
 
-        if (type == INTERPOLATION_NONE) 
-          return data[anim][pos];
-        else if (type == INTERPOLATION_LINEAR) 
-          return interpolate<T>(r,data[anim][pos],data[anim][pos+1]);
-        else if (type==INTERPOLATION_HERMITE){
-          // INTERPOLATION_HERMITE is only used in cameras afaik?
-          return interpolateHermite<T>(r,data[anim][pos],data[anim][pos+1],in[anim][pos],out[anim][pos]);
-        }
-        else if (type==INTERPOLATION_BEZIER){
-          //Is this used ingame or only by custom models?
-          return interpolateBezier<T>(r,data[anim][pos],data[anim][pos+1],in[anim][pos],out[anim][pos]);
-        }
-        else //this shouldn't appear!
-          return data[anim][pos];
-      }
-    } else {
-      // default value
-      if (data[anim].size() == 0)
-        return T();
-      else
-        return data[anim][0];
+    const animtrack::Segment s = animtrack::findSegment(times[anim], count, time);
+    const size_t i = s.index;
+    if (i + 1 >= count || type == INTERPOLATION_NONE)
+      return keys[i];
+
+    switch (type)
+    {
+      case INTERPOLATION_LINEAR:
+        return interpolate<T>(s.ratio, keys[i], keys[i + 1]);
+      case INTERPOLATION_HERMITE:
+      case INTERPOLATION_BEZIER:
+        // tangents read short of the keys (a truncated file): fall back to a straight line
+        if (anim >= (ssize_t)in.size() || i >= in[anim].size() || i >= out[anim].size())
+          return interpolate<T>(s.ratio, keys[i], keys[i + 1]);
+        if (type == INTERPOLATION_HERMITE) // only used in cameras afaik?
+          return interpolateHermite<T>(s.ratio, keys[i], keys[i + 1], in[anim][i], out[anim][i]);
+        return interpolateBezier<T>(s.ratio, keys[i], keys[i + 1], in[anim][i], out[anim][i]);
+      default: //this shouldn't appear!
+        return keys[i];
     }
-
   }
 
+  // Tracks that never have .anim files: particles, ribbons, colours, transparency, texture
+  // animations, lights, cameras.
   void init(AnimationBlock &b, GameFile * f, std::vector<uint32> & gs)
   {
-    globals = gs;
-    type = b.type;
-    seq = b.seq;
-
-    // times
-    if (b.nTimes != b.nKeys)
-      return;
-    //assert(b.nTimes == b.nKeys);
-    sizes = b.nTimes;
-    if( b.nTimes == 0 )
-      return;
-
-    // times[]/data[]/in[]/out[] are fixed C arrays of MAX_ANIMATED vectors, indexed by
-    // the animation-sequence index j. A model whose track declares more sequences than
-    // MAX_ANIMATED would otherwise push_back into vectors PAST the end of the array,
-    // corrupting whatever heap object follows this Animated<> (a classic 0xC0000374 /
-    // delayed access-violation source). Cap the per-track sequence count.
-    const size_t nAnim = (b.nTimes > MAX_ANIMATED) ? (size_t)MAX_ANIMATED : (size_t)b.nTimes;
-
-    for(size_t j=0; j < nAnim; j++) {
-      AnimationBlockHeader* pHeadTimes = (AnimationBlockHeader*)(f->getBuffer() + b.ofsTimes + j*sizeof(AnimationBlockHeader));
-
-      unsigned int *ptimes = (unsigned int*)(f->getBuffer() + pHeadTimes->ofsEntrys);
-      for (size_t i=0; i < pHeadTimes->nEntrys; i++)
-        times[j].push_back(ptimes[i]);
-    }
-
-    // keyframes
-    for(size_t j=0; j < nAnim; j++) {
-      AnimationBlockHeader* pHeadKeys = (AnimationBlockHeader*)(f->getBuffer() + b.ofsKeys + j*sizeof(AnimationBlockHeader));
-
-      D *keys = (D*)(f->getBuffer() + pHeadKeys->ofsEntrys);
-      switch (type) {
-        case INTERPOLATION_NONE:
-        case INTERPOLATION_LINEAR:
-          for (size_t i = 0; i < pHeadKeys->nEntrys; i++) 
-            data[j].push_back(Conv::conv(keys[i]));
-          break;
-        case INTERPOLATION_HERMITE:
-          for (size_t i = 0; i < pHeadKeys->nEntrys; i++) {
-            data[j].push_back(Conv::conv(keys[i*3]));
-            in[j].push_back(Conv::conv(keys[i*3+1]));
-            out[j].push_back(Conv::conv(keys[i*3+2]));
-          }
-          break;
-        //let's use same values like hermite?!?
-        case INTERPOLATION_BEZIER:
-          for (size_t i = 0; i < pHeadKeys->nEntrys; i++) {
-            data[j].push_back(Conv::conv(keys[i*3]));
-            in[j].push_back(Conv::conv(keys[i*3+1]));
-            out[j].push_back(Conv::conv(keys[i*3+2]));
-          }
-          break;
-      }
-    }
+    load(b, gs, f->getBuffer(), f->getSize(),
+         [](size_t, const unsigned char *&, size_t &) { return true; });
   }
 
+  // Bone tracks. `f` is the file that defines the bones, positioned at MD21 or SKB1; a
+  // sequence stored outside the model has its keys in its .anim file instead.
   void init(AnimationBlock &b, GameFile & f, const modelAnimData & modelData)
   {
-    globals = modelData.globalSequences;
-    type = b.type;
-    seq = b.seq;
+    load(b, modelData.globalSequences, f.getBuffer(), f.getSize(),
+         [&modelData](size_t j, const unsigned char *& buf, size_t & bufSize)
+         {
+           auto it = modelData.animfiles.find(j);
+           if (it == modelData.animfiles.end())
+             return true;      // keys in the model
+           if (!it->second)
+             return false;     // keys in an .anim file that is not there: none
+           buf = it->second->getBuffer();
+           bufSize = it->second->getSize();
+           return true;
+         });
+  }
 
-    // times
-    if (b.nTimes != b.nKeys)
-      return;
-    //assert(b.nTimes == b.nKeys);
-    sizes = b.nTimes;
-    if( b.nTimes == 0 )
-      return;
-
-    // See the other init() overload: cap the per-track sequence count so push_back never
-    // runs past the fixed-size times[]/data[]/in[]/out[] arrays (heap corruption).
-    const size_t nAnim = (b.nTimes > MAX_ANIMATED) ? (size_t)MAX_ANIMATED : (size_t)b.nTimes;
-
-    for(size_t j=0; j < nAnim; j++)
+  // What both init()s do, on plain bytes so the tests can feed it without game files. `file`
+  // holds the track's per-sequence array headers. keysFor(j, buf, size) may point sequence j's
+  // keys at another buffer -- its .anim file -- or return false when the sequence has none.
+  template <class KeysFor>
+  void load(const AnimationBlock & b, const std::vector<uint32> & gs,
+            const unsigned char * file, size_t fileSize, KeysFor keysFor)
+  {
+    globals = gs;
+    begin(b, fileSize);
+    for (size_t j = 0; j < times.size(); j++)
     {
-      uint32 *ptimes;
-      AnimationBlockHeader* pHeadTimes;
-      size_t bufSize = 0;
-      auto it = modelData.animfiles.find(modelData.animIndexToAnimId.at(j));
-      if (it != modelData.animfiles.end())
-      {
-        GameFile * animfile = it->second.first;
-        GameFile * skelfile = it->second.second;
-        skelfile->setChunk("SKB1");
-        pHeadTimes = (AnimationBlockHeader*)(skelfile->getBuffer() + b.ofsTimes + j*sizeof(AnimationBlockHeader));
-        ptimes = (uint32*)(animfile->getBuffer() + pHeadTimes->ofsEntrys);
-        if (animfile->getSize() < pHeadTimes->ofsEntrys)
-          continue;
-        bufSize = animfile->getSize();
-      }
-      else
-      {
-        pHeadTimes = (AnimationBlockHeader*)(f.getBuffer() + b.ofsTimes + j*sizeof(AnimationBlockHeader));
-        ptimes = (uint32*)(f.getBuffer() + pHeadTimes->ofsEntrys);
-        if (f.getSize() < pHeadTimes->ofsEntrys)
-          continue;
-        bufSize = f.getSize();
-      }
-
-      // nEntrys is read from the file and can over-report (a modern/malformed rig, or
-      // ofsEntrys sitting near EOF). The guard above only validated the START offset, so
-      // this loop ran past the end of the animation buffer -- an ASan heap-buffer-overflow
-      // that read garbage into the bone's animation track, producing a garbage bone matrix
-      // and flinging attached gear (helm/shoulders/weapon) off-screen. Clamp to the entries
-      // that actually fit in the buffer.
-      size_t nT = pHeadTimes->nEntrys;
-      const size_t availT = (bufSize - pHeadTimes->ofsEntrys) / sizeof(uint32);
-      if (nT > availT) nT = availT;
-      for (size_t i=0; i < nT; i++)
-        times[j].push_back(ptimes[i]);
-    }
-
-    // keyframes
-    for(size_t j=0; j < nAnim; j++)
-    {
-      D *keys;
-      AnimationBlockHeader* pHeadKeys;
-      size_t bufSize = 0;
-      auto it = modelData.animfiles.find(modelData.animIndexToAnimId.at(j));
-      if (it != modelData.animfiles.end())
-      {
-        GameFile * animfile = it->second.first;
-        GameFile * skelfile = it->second.second;
-        skelfile->setChunk("SKB1");
-        pHeadKeys = (AnimationBlockHeader*)(skelfile->getBuffer() + b.ofsKeys + j*sizeof(AnimationBlockHeader));
-        keys = (D*)(animfile->getBuffer() + pHeadKeys->ofsEntrys);
-        if (animfile->getSize() < pHeadKeys->ofsEntrys)
-          continue;
-        bufSize = animfile->getSize();
-      }
-      else
-      {
-        pHeadKeys = (AnimationBlockHeader*)(f.getBuffer() + b.ofsKeys + j*sizeof(AnimationBlockHeader));
-        keys = (D*)(f.getBuffer() + pHeadKeys->ofsEntrys);
-        if (f.getSize() < pHeadKeys->ofsEntrys)
-          continue;
-        bufSize = f.getSize();
-      }
-
-      // Same clamp as the times loop above: nEntrys can over-report and run the read off the
-      // end of the buffer. Hermite/Bezier consume 3 D-sized entries (value + in/out tangents)
-      // per keyframe, so divide the budget by 3 for those.
-      const size_t availK = (bufSize - pHeadKeys->ofsEntrys) / sizeof(D);
-      switch (type)
-      {
-        case INTERPOLATION_NONE:
-        case INTERPOLATION_LINEAR:
-        {
-          size_t nK = pHeadKeys->nEntrys;
-          if (nK > availK) nK = availK;
-          for (size_t i = 0; i < nK; i++)
-            data[j].push_back(Conv::conv(keys[i]));
-          break;
-        }
-        case INTERPOLATION_HERMITE:
-        case INTERPOLATION_BEZIER:
-        {
-          size_t nK = pHeadKeys->nEntrys;
-          if (nK > availK / 3) nK = availK / 3;
-          for (size_t i = 0; i < nK; i++)
-          {
-            data[j].push_back(Conv::conv(keys[i*3]));
-            in[j].push_back(Conv::conv(keys[i*3+1]));
-            out[j].push_back(Conv::conv(keys[i*3+2]));
-          }
-          break;
-        }
-      }
+      const unsigned char * buf = file;
+      size_t bufSize = fileSize;
+      // A track on a global sequence is not per-sequence data and is never in an .anim file;
+      // reading it from sequence 0's file read garbage whenever that sequence had one.
+      if (seq < 0 && !keysFor(j, buf, bufSize))
+        continue;
+      readSequence(j, b, file, fileSize, buf, bufSize);
     }
   }
 
@@ -418,13 +340,10 @@ public:
     out << "      <type>"<< v.type << "</type>" << std::endl;
     out << "      <seq>"<< v.seq << "</seq>" << std::endl;
     out << "      <anims>"<< std::endl;
-    for(size_t j=0; j<v.sizes; j++) {
+    for(size_t j=0; j<v.data.size(); j++) {
       if (j != 0) continue; // only output walk animation
       if (v.uses((unsigned int)j)) {
         out << "    <anim id=\"" << j << "\" size=\""<< v.data[j].size() <<"\">" << std::endl;
-        for(size_t k=0; k<v.data[j].size(); k++) {
-  //        out << "      <data time=\"" << v.times[j][k]  << "\">" << v.data[j][k] << "</data>" << std::endl;
-        }
         out << "    </anim>" << std::endl;
       }
       if (v.seq > -1 && j > 0)
@@ -432,6 +351,84 @@ public:
     }
     out << "      </anims>"<< std::endl;
     return out;
+  }
+
+private:
+  // One array per declared sequence, as many as the track's headers fit in the file.
+  void begin(const AnimationBlock & b, size_t headerFileSize)
+  {
+    type = b.type;
+    seq = b.seq;
+    times.clear();
+    data.clear();
+    in.clear();
+    out.clear();
+    sizes = 0;
+
+    if (b.nTimes != b.nKeys || b.nTimes == 0)
+      return;
+
+    const size_t hsz = sizeof(AnimationBlockHeader);
+    size_t n = b.nTimes;
+    const size_t firstHeader = std::max<size_t>(b.ofsTimes, b.ofsKeys);
+    if (firstHeader >= headerFileSize)
+      return;
+    n = std::min(n, (headerFileSize - firstHeader) / hsz);
+
+    sizes = n;
+    times.resize(n);
+    data.resize(n);
+    if (type == INTERPOLATION_HERMITE || type == INTERPOLATION_BEZIER)
+    {
+      in.resize(n);
+      out.resize(n);
+    }
+  }
+
+  // Sequence j: its array headers in `hdr` (the file that defines the track), the arrays in
+  // `buf` -- the same file, or the sequence's .anim file. Counts are clamped to what the
+  // buffer holds: a header that over-reports (a modern rig, an offset near the end) used to
+  // read past the buffer and turn the bone's track into garbage.
+  void readSequence(size_t j, const AnimationBlock & b, const unsigned char * hdr, size_t hdrSize,
+                    const unsigned char * buf, size_t bufSize)
+  {
+    const size_t hsz = sizeof(AnimationBlockHeader);
+    if ((size_t)b.ofsTimes + (j + 1) * hsz > hdrSize || (size_t)b.ofsKeys + (j + 1) * hsz > hdrSize)
+      return;
+
+    AnimationBlockHeader headTimes, headKeys;
+    memcpy(&headTimes, hdr + b.ofsTimes + j * hsz, hsz);
+    memcpy(&headKeys, hdr + b.ofsKeys + j * hsz, hsz);
+
+    if (headTimes.ofsEntrys <= bufSize)
+    {
+      const size_t n = std::min<size_t>(headTimes.nEntrys,
+                                        (bufSize - headTimes.ofsEntrys) / sizeof(uint32));
+      const uint32 * src = (const uint32 *)(buf + headTimes.ofsEntrys);
+      times[j].reserve(n);
+      for (size_t i = 0; i < n; i++)
+        times[j].push_back(src[i]);
+    }
+
+    if (headKeys.ofsEntrys <= bufSize)
+    {
+      // Hermite and Bezier store three values per key: the value and its two tangents.
+      const bool tangents = (type == INTERPOLATION_HERMITE || type == INTERPOLATION_BEZIER);
+      const size_t perKey = tangents ? 3 : 1;
+      const size_t n = std::min<size_t>(headKeys.nEntrys,
+                                        (bufSize - headKeys.ofsEntrys) / (sizeof(D) * perKey));
+      const D * keys = (const D *)(buf + headKeys.ofsEntrys);
+      data[j].reserve(n);
+      for (size_t i = 0; i < n; i++)
+      {
+        data[j].push_back(Conv::conv(keys[i * perKey]));
+        if (tangents)
+        {
+          in[j].push_back(Conv::conv(keys[i * 3 + 1]));
+          out[j].push_back(Conv::conv(keys[i * 3 + 2]));
+        }
+      }
+    }
   }
 };
 

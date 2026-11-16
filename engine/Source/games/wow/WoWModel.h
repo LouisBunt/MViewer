@@ -93,6 +93,9 @@ class _WOWMODEL_API_ WoWModel : public ManagedItem, public Displayable, public M
 
   void animate(ssize_t anim);
   void calcBones(ssize_t anim, size_t time);
+  // The sequence whose keys `anim` plays: itself, or for an alias (ANIMATION_ALIAS) the
+  // sequence its alias chain ends in.
+  ssize_t dataSequence(ssize_t anim) const;
 
   void lightsOn(GLuint lbase);
   void lightsOff(GLuint lbase);
@@ -134,7 +137,9 @@ class _WOWMODEL_API_ WoWModel : public ManagedItem, public Displayable, public M
   bool animGeometry, animBones;
 
   std::vector<AFID> readAFIDSFromFile(GameFile * f);
-  void readAnimsFromFile(GameFile * f, std::vector<AFID> & afids, modelAnimData & data, uint32 nAnimations, uint32 ofsAnimation, uint32 nAnimationLookup, uint32 ofsAnimationLookup);
+  // animChunk: where a chunked .anim file keeps the keys for these bones -- "AFM2" when they
+  // are the model's own, "AFSB" when they come from a .skel.
+  void readAnimsFromFile(GameFile * f, std::vector<AFID> & afids, modelAnimData & data, uint32 nAnimations, uint32 ofsAnimation, uint32 nAnimationLookup, uint32 ofsAnimationLookup, const char * animChunk);
   std::vector<TXID> readTXIDSFromFile(GameFile * f);
 
 public:

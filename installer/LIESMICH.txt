@@ -408,6 +408,19 @@ Neu in 1.5: ohne WoW-Installation
   allein auf der Befehlszeile wurde fuer einen WoW-Ordner gehalten, sodass das
   Druck-Beispiel oben scheiterte. Ein Skriptlauf ohne Ordner blieb an einem Dialog
   haengen.
+- Animationen repariert. Bisher konnten Modelle beim Abspielen zerfallen: Die
+  Varianten einer Animation (Stehen 1, Stehen 2, ...) lasen ihre Bewegung aus der
+  Datei einer anderen, und Koerperteile flogen ins Unendliche -- beim Menschen in
+  78 von 416 Animationen. Ebenso behoben: das Zucken am Ende einer Schleife und
+  Teile, die auf einen Punkt zusammenfielen.
+- Effekte auf Ruestung bewegen sich. Schwebende und drehende Teile, pulsierendes
+  Leuchten und laufende Texturen -- etwa auf den Elite-Schultern der PvP-Saison 2 --
+  standen bisher still auf ihrem ersten Bild.
+- Leuchtflaechen drehen sich zur Kamera. Bisher kippten sie beim Drehen der
+  Ansicht weg und wurden von der Seite zu einem Strich; die stehenden Lichtkarten
+  (etwa auf den Krieger-Schultern) blieben ganz starr.
+- Partikel fliegen in die Richtung, in die ihr Ausgangspunkt zeigt, statt immer
+  nach oben, und die Beleuchtung folgt bewegten Teilen.
 
 
 Datenuebertragung

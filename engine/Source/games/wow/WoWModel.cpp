@@ -344,9 +344,9 @@ bool WoWModel::isAnimated()
       if (ov_it->weights[b]>0)
       {
         ModelBoneDef &bb = bo[ov_it->bones[b]];
-        if (bb.translation.type || bb.rotation.type || bb.scaling.type || (bb.flags & MODELBONE_BILLBOARD))
+        if (bb.translation.type || bb.rotation.type || bb.scaling.type || (bb.flags & MODELBONE_BILLBOARD_ANY))
         {
-          if (bb.flags & MODELBONE_BILLBOARD)
+          if (bb.flags & MODELBONE_BILLBOARD_ANY)
           {
             // if we have billboarding, the model will need per-instance animation
             ind = true;
@@ -455,7 +455,7 @@ void WoWModel::initCommon()
   if (getenv("WMV_DUMP_ANIMCOUNT"))
     LOG_INFO << "ANIMCOUNT nAnimations" << header.nAnimations << "nGlobalSequences" << header.nGlobalSequences
              << "nColors" << header.nColors << "nTransparency" << header.nTransparency
-             << "nTexAnims" << header.nTexAnims << "(MAX_ANIMATED=500)";
+             << "nTexAnims" << header.nTexAnims;
 
   // displayHeader(header);
 
@@ -946,14 +946,30 @@ std::vector<AFID> WoWModel::readAFIDSFromFile(GameFile * f)
   return afids;
 }
 
-void WoWModel::readAnimsFromFile(GameFile * f, std::vector<AFID> & afids, modelAnimData & data, uint32 nAnimations, uint32 ofsAnimation, uint32 nAnimationLookup, uint32 ofsAnimationLookup)
+void WoWModel::readAnimsFromFile(GameFile * f, std::vector<AFID> & afids, modelAnimData & data, uint32 nAnimations, uint32 ofsAnimation, uint32 nAnimationLookup, uint32 ofsAnimationLookup, const char * animChunk)
 {
+  // Sequences left without keys, reported once: item models often copy a character's whole
+  // sequence table without shipping its .anim files, and a line per sequence buried the log.
+  uint unreadable = 0;
+  int firstUnreadable = -1;
+
   for (uint i = 0; i < nAnimations; i++)
   {
     ModelAnimation a;
     memcpy(&a, f->getBuffer() + ofsAnimation + i*sizeof(ModelAnimation), sizeof(ModelAnimation));
 
     anims.push_back(a);
+
+    // Keys in the model, or an alias that borrows another sequence's: no .anim file to find.
+    if (a.flags & (ANIMATION_KEYS_IN_MODEL | ANIMATION_ALIAS))
+      continue;
+
+    // Every other sequence keeps its keys in its .anim file and nowhere else -- its track
+    // headers hold offsets into that file. Until the file is found, the sequence is marked as
+    // having no keys at all: when it was missing (not in the install, not yet in the online
+    // cache, no AFID entry), those offsets used to be read against the model instead, and the
+    // garbage they found sent the bones, and everything attached to them, off to infinity.
+    data.animfiles[i] = 0;
 
     GameFile * Anim = 0;
 
@@ -976,18 +992,36 @@ void WoWModel::readAnimsFromFile(GameFile * f, std::vector<AFID> & afids, modelA
       Anim = GAMEDIRECTORY.getFile(tempname);
     }
 
-    if (Anim && Anim->open())
+    if (!Anim || !Anim->open())
     {
-      Anim->setChunk("AFSB"); // try to set chunk if it exist, no effect if there is no AFSB chunk present
-      {     
-        auto animIt = data.animfiles.find(anims[i].animID);
-        if (animIt != data.animfiles.end())
-          LOG_INFO << "WARNING - replacing" << data.animfiles[anims[i].animID].first->fullname() << "by" << Anim->fullname();
-      }
-      
-      data.animfiles[anims[i].animID] = std::make_pair(Anim, f);
+      if (unreadable++ == 0)
+        firstUnreadable = (int)i;
+      continue;
     }
+
+    // A chunked .anim file (Legion on) keeps the keys for bones in the model under AFM2 and
+    // for bones in a skeleton under AFSB. A file with one chunk is already positioned on it;
+    // one with several is not, and was read from its start -- the 8-byte chunk header off,
+    // every key garbage. A chunked file without the chunk these bones need holds nothing for
+    // them.
+    if (Anim->isChunked() && !Anim->setChunk(animChunk))
+    {
+      LOG_WARNING << "Animation file" << Anim->fullname() << "has no" << animChunk << "chunk";
+      Anim->close();
+      if (unreadable++ == 0)
+        firstUnreadable = (int)i;
+      continue;
+    }
+
+    // By sequence index: see modelAnimData. Keyed by animation id, the variations of one
+    // animation overwrote each other's files.
+    data.animfiles[i] = Anim;
   }
+
+  if (unreadable)
+    LOG_WARNING << modelname.c_str() << ":" << unreadable << "of" << nAnimations
+                << "sequences keep their keys in .anim files that could not be read -- they will"
+                << "not move (first: sequence" << firstUnreadable << ")";
 
   // Index at ofsAnimations which represents the animation in AnimationData.dbc. -1 if none.
   if (nAnimationLookup > 0)
@@ -1087,7 +1121,7 @@ void WoWModel::initAnimated()
                     << "\n  -> using PARENT for anims and bones; child data discarded\n";
               }
 
-              readAnimsFromFile(parentFile, afids, data, Sks1.nAnimations, Sks1.ofsAnimations, Sks1.nAnimationLookup, Sks1.ofsAnimationLookup);
+              readAnimsFromFile(parentFile, afids, data, Sks1.nAnimations, Sks1.ofsAnimations, Sks1.nAnimationLookup, Sks1.ofsAnimationLookup, "AFSB");
             }
 
             parentFile->close();
@@ -1109,7 +1143,7 @@ void WoWModel::initAnimated()
                 << " instead of inheriting the parent's\n";
           }
 
-          readAnimsFromFile(skelFile, afids, data, sks1.nAnimations, sks1.ofsAnimations, sks1.nAnimationLookup, sks1.ofsAnimationLookup);
+          readAnimsFromFile(skelFile, afids, data, sks1.nAnimations, sks1.ofsAnimations, sks1.nAnimationLookup, sks1.ofsAnimationLookup, "AFSB");
         }
 
         animManager = new AnimManager(*this);
@@ -1131,9 +1165,6 @@ void WoWModel::initAnimated()
           memcpy(&skb1, fileToUse->getBuffer(), sizeof(SKB1));
           bones.resize(skb1.nBones);
           ModelBoneDef *mb = (ModelBoneDef*)(fileToUse->getBuffer() + skb1.ofsBones);
-
-          for (uint i = 0; i < anims.size(); i++)
-            data.animIndexToAnimId[i] = anims[i].animID;
 
           for (size_t i = 0; i < skb1.nBones; i++)
             bones[i].initV3(*fileToUse, mb[i], data);
@@ -1165,16 +1196,13 @@ void WoWModel::initAnimated()
       gamefile->setChunk("MD21", false);
     }
 
-    readAnimsFromFile(gamefile, afids, data, header.nAnimations, header.ofsAnimations, header.nAnimationLookup, header.ofsAnimationLookup);
+    readAnimsFromFile(gamefile, afids, data, header.nAnimations, header.ofsAnimations, header.nAnimationLookup, header.ofsAnimationLookup, "AFM2");
 
     animManager = new AnimManager(*this);
 
     // init bones...
     bones.resize(header.nBones);
     ModelBoneDef *mb = (ModelBoneDef*)(gamefile->getBuffer() + header.ofsBones);
-
-    for (uint i = 0; i < anims.size(); i++)
-      data.animIndexToAnimId[i] = anims[i].animID;
 
     for (uint i = 0; i < bones.size(); i++)
       bones[i].initV3(*gamefile, mb[i], data);
@@ -1223,8 +1251,8 @@ void WoWModel::initAnimated()
   // free MPQFile
   for (auto it : data.animfiles)
   {
-    if (it.second.first != 0)
-      it.second.first->close();
+    if (it.second != 0)
+      it.second->close();
   }
 
   const size_t size = (origVertices.size() * sizeof(float));
@@ -2076,6 +2104,11 @@ bool WoWModel::sortPasses(ModelRenderPass* mrp1, ModelRenderPass* mrp2)
   return mrp1->blendmode < mrp2->blendmode;
 }
 
+ssize_t WoWModel::dataSequence(ssize_t index) const
+{
+  return animtrack::dataSequence(anims, index);
+}
+
 void WoWModel::calcBones(ssize_t Anim, size_t time)
 {
   // Reset all bones to 'false' which means they haven't been animated yet.
@@ -2108,8 +2141,8 @@ void WoWModel::calcBones(ssize_t Anim, size_t time)
     }
     */
     // Alfred 2009.07.23 use animLookups to speedup
-    if (animLookups.size() >= ANIMATION_HANDSCLOSED && animLookups[ANIMATION_HANDSCLOSED] > 0) // closed fist
-      closeFistID = animLookups[ANIMATION_HANDSCLOSED];
+    if (animLookups.size() > ANIMATION_HANDSCLOSED && animLookups[ANIMATION_HANDSCLOSED] > 0) // closed fist
+      closeFistID = dataSequence(animLookups[ANIMATION_HANDSCLOSED]);
 
     // Animate key skeletal bones except the fingers which we do later.
     // -----
@@ -2118,7 +2151,7 @@ void WoWModel::calcBones(ssize_t Anim, size_t time)
     // if we have a "secondary animation" selected,  animate upper body using that.
     if (animManager->GetSecondaryID() > -1)
     {
-      a = animManager->GetSecondaryID();
+      a = dataSequence(animManager->GetSecondaryID());
       t = animManager->GetSecondaryFrame();
     }
     else
@@ -2137,9 +2170,9 @@ void WoWModel::calcBones(ssize_t Anim, size_t time)
     {
       // Animate the head and jaw
       if (keyBoneLookup[BONE_HEAD] > -1)
-        bones[keyBoneLookup[BONE_HEAD]].calcMatrix(bones, animManager->GetMouthID(), animManager->GetMouthFrame());
+        bones[keyBoneLookup[BONE_HEAD]].calcMatrix(bones, dataSequence(animManager->GetMouthID()), animManager->GetMouthFrame());
       if (keyBoneLookup[BONE_JAW] > -1)
-        bones[keyBoneLookup[BONE_JAW]].calcMatrix(bones, animManager->GetMouthID(), animManager->GetMouthFrame());
+        bones[keyBoneLookup[BONE_JAW]].calcMatrix(bones, dataSequence(animManager->GetMouthID()), animManager->GetMouthFrame());
     }
     else
     {
@@ -2209,7 +2242,7 @@ void WoWModel::calcBones(ssize_t Anim, size_t time)
     // if we have a "secondary animation" selected,  animate upper body using that.
     if (animManager->GetSecondaryID() > -1)
     {
-      a = animManager->GetSecondaryID();
+      a = dataSequence(animManager->GetSecondaryID());
       t = animManager->GetSecondaryFrame();
     }
     else
@@ -2228,9 +2261,9 @@ void WoWModel::calcBones(ssize_t Anim, size_t time)
     {
       // Animate the head and jaw
       if (keyBoneLookup[BONE_HEAD] > -1)
-        bones[keyBoneLookup[BONE_HEAD]].calcMatrix(bones, animManager->GetMouthID(), animManager->GetMouthFrame());
+        bones[keyBoneLookup[BONE_HEAD]].calcMatrix(bones, dataSequence(animManager->GetMouthID()), animManager->GetMouthFrame());
       if (keyBoneLookup[BONE_JAW] > -1)
-        bones[keyBoneLookup[BONE_JAW]].calcMatrix(bones, animManager->GetMouthID(), animManager->GetMouthFrame());
+        bones[keyBoneLookup[BONE_JAW]].calcMatrix(bones, dataSequence(animManager->GetMouthID()), animManager->GetMouthFrame());
     }
     else
     {
@@ -2260,8 +2293,8 @@ void WoWModel::animate(ssize_t Anim)
 {
   size_t t = 0;
 
-  ModelAnimation &a = anims[Anim];
-  int tmax = a.length;
+  // A model can be animated by its global sequences alone and have no sequence to index.
+  int tmax = (Anim >= 0 && (size_t)Anim < anims.size()) ? (int)anims[Anim].length : 0;
   if (tmax == 0)
     tmax = 1;
 
@@ -2272,6 +2305,11 @@ void WoWModel::animate(ssize_t Anim)
   }
   else
     t = animManager->GetFrame();
+
+  // An alias sequence has no keys of its own; its bones, particles and texture animations
+  // read the sequence it stands for. Read directly, every track came up empty and the model
+  // stood in its bind pose for the whole of an aliased animation.
+  Anim = dataSequence(Anim);
 
   this->animtime = t;
   this->anim = Anim;

@@ -67,3 +67,25 @@ target_include_directories(uitest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
 target_link_libraries(uitest Qt5::Core Qt5::Gui Qt5::Widgets Qt5::Svg)
 add_test(NAME ui_blocks COMMAND uitest)
 set_tests_properties(ui_blocks PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+# The animation tracks (engine/Source/games/wow/animated.h): which file each sequence's keys are
+# read from, the keyframe search, global sequences and aliases. Header-only apart from the clock
+# the renderer advances, so the test compiles with that one engine source: no game data, no
+# engine build. Each case is a way a real model's animation used to come apart.
+set(WOW_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../engine/Source/games/wow)
+add_executable(animtest
+  animtest/main.cpp
+  ${WOW_DIR}/animated.cpp)
+target_include_directories(animtest PRIVATE
+  ${WOW_DIR}
+  ${CMAKE_CURRENT_SOURCE_DIR}/../engine/Source/core
+  ${CMAKE_CURRENT_SOURCE_DIR}/../engine/ThirdParty)
+# animated.cpp defines that clock as an export of the wow library; built here, it is this
+# program's own.
+target_compile_definitions(animtest PRIVATE BUILDING_WOW_DLL)
+if(NOT MSVC)
+  # GameFile.h, which animated.h includes for its file type, spells a 32-bit int the MSVC way.
+  target_compile_definitions(animtest PRIVATE __int32=int)
+endif()
+target_link_libraries(animtest Qt5::Core)
+add_test(NAME animation_tracks COMMAND animtest)

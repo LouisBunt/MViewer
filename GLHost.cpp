@@ -17,6 +17,7 @@
 
 #include "Attachment.h"
 #include "SceneLighting.h"
+#include "animated.h"   // globalTime
 #include "video.h"
 #include "WoWModel.h"
 
@@ -367,7 +368,7 @@ void GLHost::tick()
   if (!videoReady_)
     return;
 
-  // Three things the wx canvas did here and this one never did (ModelCanvas::Render,
+  // Four things the wx canvas did here and this one never did (ModelCanvas::Render,
   // modelcanvas.cpp:1497-1521). Each was a separate visible fault:
   //
   // 1. AnimManager::Tick() does not check Paused itself -- the gate sat in the canvas.
@@ -384,6 +385,13 @@ void GLHost::tick()
   int dt = 16;
   if (model_ && model_->animManager && model_->animManager->IsPaused())
     dt = 0;
+
+  // 4. The clock of the global sequences -- the loops that run regardless of the animation
+  //    picked: floating and turning parts, pulsing glows, scrolling textures, most of what
+  //    moves on elite and tier gear. The wx canvas advanced it every tick
+  //    (modelcanvas.cpp:1507); this one never did, so all of it stood frozen on its first
+  //    frame. Held by the pause like everything else, so a paused shot is a still.
+  globalTime += (size_t)dt;
 
   if (root_)
     root_->tick((float)dt);
