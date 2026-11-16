@@ -948,6 +948,11 @@ std::vector<AFID> WoWModel::readAFIDSFromFile(GameFile * f)
 
 void WoWModel::readAnimsFromFile(GameFile * f, std::vector<AFID> & afids, modelAnimData & data, uint32 nAnimations, uint32 ofsAnimation, uint32 nAnimationLookup, uint32 ofsAnimationLookup, const char * animChunk)
 {
+  // Sequences left without keys, reported once: item models often copy a character's whole
+  // sequence table without shipping its .anim files, and a line per sequence buried the log.
+  uint unreadable = 0;
+  int firstUnreadable = -1;
+
   for (uint i = 0; i < nAnimations; i++)
   {
     ModelAnimation a;
@@ -989,8 +994,8 @@ void WoWModel::readAnimsFromFile(GameFile * f, std::vector<AFID> & afids, modelA
 
     if (!Anim || !Anim->open())
     {
-      LOG_ERROR << "No animation file for sequence" << i << "(animation" << a.animID << "variation"
-                << a.subAnimID << ") -- it will not move";
+      if (unreadable++ == 0)
+        firstUnreadable = (int)i;
       continue;
     }
 
@@ -1001,9 +1006,10 @@ void WoWModel::readAnimsFromFile(GameFile * f, std::vector<AFID> & afids, modelA
     // them.
     if (Anim->isChunked() && !Anim->setChunk(animChunk))
     {
-      LOG_ERROR << "Animation file" << Anim->fullname() << "has no" << animChunk
-                << "chunk -- sequence" << i << "will not move";
+      LOG_WARNING << "Animation file" << Anim->fullname() << "has no" << animChunk << "chunk";
       Anim->close();
+      if (unreadable++ == 0)
+        firstUnreadable = (int)i;
       continue;
     }
 
@@ -1011,6 +1017,11 @@ void WoWModel::readAnimsFromFile(GameFile * f, std::vector<AFID> & afids, modelA
     // animation overwrote each other's files.
     data.animfiles[i] = Anim;
   }
+
+  if (unreadable)
+    LOG_WARNING << modelname.c_str() << ":" << unreadable << "of" << nAnimations
+                << "sequences keep their keys in .anim files that could not be read -- they will"
+                << "not move (first: sequence" << firstUnreadable << ")";
 
   // Index at ofsAnimations which represents the animation in AnimationData.dbc. -1 if none.
   if (nAnimationLookup > 0)
